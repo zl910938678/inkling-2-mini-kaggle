@@ -212,7 +212,7 @@ def main():
         with backend_log.open('w') as log:
             llama = subprocess.Popen([str(binary), '--host', '127.0.0.1', '--port', '8080',
                                       '--model', str(weights), '--alias', MODEL, '--n-gpu-layers', '999',
-                                      '--split-mode', 'layer', '--tensor-split', '1,1', '--ctx-size', '4096',
+                                      '--split-mode', 'layer', '--tensor-split', '1,3', '--ctx-size', '4096',
                                       '--parallel', '1', '--batch-size', '256', '--ubatch-size', '128', '--jinja'],
                                      stdout=log, stderr=subprocess.STDOUT, env=env)
         children.append(llama)
