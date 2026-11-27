@@ -18,6 +18,8 @@ TAG = 'b12600'
 HF = 'https://huggingface.co/ggml-org/Inkling-2-Mini-GGUF/resolve/e8a2cecf0e78914f07cc27b9be711a9b2c7561d9'
 GH = f'https://github.com/ggml-org/llama.cpp/releases/download/{TAG}'
 BACKEND = 'http://127.0.0.1:8080'
+MAX_TOKENS = 2048
+UPSTREAM_TIMEOUT = 600
 
 
 def download(url, path, sha=None):
@@ -143,7 +145,7 @@ get('chat').onsubmit = async (ev) => {
  const user = {role:'user',content}; let output = '', reasoning = '', finishReason = '', complete = false;
  try {
   const response = await fetch('/v1/chat/completions', {method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+key.value.trim()},
-   body:JSON.stringify({model:'Inkling-2-Mini',messages:[...messages,user],stream:true,max_tokens:512}), signal:controller.signal});
+   body:JSON.stringify({model:'Inkling-2-Mini',messages:[...messages,user],stream:true,max_tokens:2048}), signal:controller.signal});
   if (!response.ok) throw new Error(response.status === 401 ? '会话密钥不正确。' : response.status === 429 ? '模型正在处理其他请求，请稍后重试。' : '请求失败（HTTP '+response.status+'）。');
   if (!response.headers.get('Content-Type')?.includes('text/event-stream')) throw new Error('服务未返回流式响应。');
   await readEvents(response, event => {
@@ -189,7 +191,7 @@ class Gateway(BaseHTTPRequestHandler):
 
     def proxy(self, payload=None):
         try:
-            with request(BACKEND + self.path, payload, timeout=100) as reply:
+            with request(BACKEND + self.path, payload, timeout=UPSTREAM_TIMEOUT) as reply:
                 self.respond(reply.status, reply.read())
         except HTTPError as err:
             self.respond(err.code, err.read())
@@ -199,7 +201,7 @@ class Gateway(BaseHTTPRequestHandler):
     def proxy_stream(self, payload):
         started = False
         try:
-            with request(BACKEND + self.path, payload, timeout=100) as reply:
+            with request(BACKEND + self.path, payload, timeout=UPSTREAM_TIMEOUT) as reply:
                 self.send_response(reply.status)
                 self.send_header('Content-Type', 'text/event-stream')
                 self.send_header('Cache-Control', 'no-cache, no-transform')
@@ -245,11 +247,11 @@ class Gateway(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(size))
             if not isinstance(payload, dict) or type(payload.get('stream', False)) is not bool:
                 raise ValueError
-            limit = payload.setdefault('max_tokens', 512)
-            if type(limit) is not int or not 1 <= limit <= 1024:
+            limit = payload.setdefault('max_tokens', MAX_TOKENS)
+            if type(limit) is not int or not 1 <= limit <= MAX_TOKENS:
                 raise ValueError
         except (ValueError, UnicodeError):
-            self.respond(400, b'{"error":"Use a JSON object, boolean stream and max_tokens from 1 to 1024"}')
+            self.respond(400, b'{"error":"Use a JSON object, boolean stream and max_tokens from 1 to 2048"}')
             return
         if not self.server.slot.acquire(blocking=False):
             self.respond(429, b'{"error":"Inference slot is busy. Try again shortly."}')
