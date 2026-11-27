@@ -17,7 +17,7 @@ API client settings:
 - Base URL: the logged `OPENAI_BASE_URL`, ending in `/v1`.
 - API key: the current run's `SESSION_KEY`.
 - Model: `Inkling-2-Mini`.
-- Request settings: `stream: true` for SSE token streaming, or `stream: false` for a regular JSON response; `max_tokens` from 1 to 2048. The gateway allows up to 10 minutes without an upstream byte before reporting a timeout.
+- Request settings: `stream: true` for SSE token streaming, or `stream: false` for a regular JSON response; `max_tokens` from 1 to 8192 (default 4096, including reasoning). The web page lets you select the reply budget. Context is 8192 tokens shared by the prompt, chat history and generated reply. The gateway and model server use a 600-second socket timeout; there is no 600-second total limit on an active stream.
 
 The address is temporary and may change when the tunnel reconnects. Stopping the Kaggle session or reaching its runtime limit closes the service and invalidates the session key. Run the notebook again to create a new address and key.
 
