@@ -18,7 +18,9 @@ TAG = 'b12600'
 HF = 'https://huggingface.co/ggml-org/Inkling-2-Mini-GGUF/resolve/e8a2cecf0e78914f07cc27b9be711a9b2c7561d9'
 GH = f'https://github.com/ggml-org/llama.cpp/releases/download/{TAG}'
 BACKEND = 'http://127.0.0.1:8080'
-MAX_TOKENS = 2048
+DEFAULT_MAX_TOKENS = 4096
+MAX_TOKENS = 8192
+CONTEXT_SIZE = 8192
 UPSTREAM_TIMEOUT = 600
 
 
@@ -95,17 +97,18 @@ UI = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="vie
 <title>Inkling 2 Mini</title><style>
 *{box-sizing:border-box}body{margin:0;background:#f7f8fa;color:#172a26;font:16px system-ui}
 main{width:min(100% - 32px,700px);margin:5vh auto}h1{font-size:1.8rem}label{display:block;font-weight:600;margin:1rem 0 .4rem}
-input,textarea{width:100%;font:inherit;padding:.65rem;border:1px solid #819790;border-radius:6px}textarea{resize:vertical}
+input,textarea,select{width:100%;font:inherit;padding:.65rem;border:1px solid #819790;border-radius:6px}textarea{resize:vertical}
 button{margin:.65rem .35rem 0 0;padding:.5rem .8rem;border-radius:6px;border:1px solid #206044;background:#206044;color:white;font:inherit}button+button{background:white;color:#206044}button:disabled{opacity:.65}
 article{border-top:1px solid #c6d1cd;margin-top:1rem;padding-top:.7rem}p{white-space:pre-wrap;overflow-wrap:anywhere}details{color:#53655e;font-size:.9rem}summary{cursor:pointer}
 </style><main><h1>Inkling 2 Mini</h1><p>双 T4 · 实时流式对话</p><form id="chat"><label for="key">会话密钥</label>
 <input type="password" id="key" autocomplete="off" required><div id="history" aria-live="polite"></div>
 <label for="message">消息</label><textarea id="message" rows="4" required maxlength="8000"></textarea>
+<label for="tokens">回复额度（含思考 token）</label><select id="tokens"><option value="2048">2,048 token</option><option value="4096" selected>4,096 token</option><option value="8192">8,192 token</option></select>
 <button id="send">发送</button><button type="button" id="stop" disabled>停止生成</button><button type="button" id="clear">清空对话</button><p id="status" role="status"></p></form></main>
 <script>
 const get = (id) => document.getElementById(id);
 const key = get('key'), message = get('message'), list = get('history'),
-send = get('send'), clear = get('clear'), stop = get('stop'), statusLine = get('status'), messages = [];
+send = get('send'), clear = get('clear'), stop = get('stop'), tokens = get('tokens'), statusLine = get('status'), messages = [];
 let controller;
 function append(label, text) {
  const row = document.createElement('article'), title = document.createElement('strong'), body = document.createElement('p');
@@ -138,14 +141,14 @@ get('chat').onsubmit = async (ev) => {
  ev.preventDefault(); const content = message.value.trim(); if (!content) return;
  if (controller) return;
  controller = new AbortController();
- send.disabled = clear.disabled = key.disabled = true; stop.disabled = false; statusLine.textContent = '正在连接…';
+ send.disabled = clear.disabled = key.disabled = tokens.disabled = true; stop.disabled = false; statusLine.textContent = '正在连接…';
  append('你', content);
  const answer = append('Inkling', ''), details = document.createElement('details'), summary = document.createElement('summary'), reasoningBody = document.createElement('p');
  summary.textContent = '思考过程'; details.append(summary, reasoningBody); details.hidden = true; details.open = true; answer.row.insertBefore(details, answer.body);
  const user = {role:'user',content}; let output = '', reasoning = '', finishReason = '', complete = false;
  try {
   const response = await fetch('/v1/chat/completions', {method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+key.value.trim()},
-   body:JSON.stringify({model:'Inkling-2-Mini',messages:[...messages,user],stream:true,max_tokens:2048}), signal:controller.signal});
+   body:JSON.stringify({model:'Inkling-2-Mini',messages:[...messages,user],stream:true,max_tokens:Number(tokens.value)}), signal:controller.signal});
   if (!response.ok) throw new Error(response.status === 401 ? '会话密钥不正确。' : response.status === 429 ? '模型正在处理其他请求，请稍后重试。' : '请求失败（HTTP '+response.status+'）。');
   if (!response.headers.get('Content-Type')?.includes('text/event-stream')) throw new Error('服务未返回流式响应。');
   await readEvents(response, event => {
@@ -157,12 +160,12 @@ get('chat').onsubmit = async (ev) => {
   });
   if (!output && !reasoning) throw new Error('模型没有返回文本。');
   complete = true;
-  statusLine.textContent = finishReason === 'length' ? '已达到本次输出上限。' : '生成完成';
+  statusLine.textContent = finishReason === 'length' ? '已达到回复额度或上下文上限，可提高额度或发送“继续”。' : '生成完成';
  } catch (err) { statusLine.textContent = err.name === 'AbortError' ? '已停止生成。' : err.message; }
  finally {
   if (output) { messages.push(user,{role:'assistant',content:output}); message.value = ''; }
   else if (complete && reasoning) statusLine.textContent += ' 当前仅返回了思考过程，可重试或简化问题。';
-  controller = null; send.disabled = clear.disabled = key.disabled = false; stop.disabled = true; message.focus();
+  controller = null; send.disabled = clear.disabled = key.disabled = tokens.disabled = false; stop.disabled = true; message.focus();
  }
 };
 </script></html>'''.encode('utf-8')
@@ -247,11 +250,11 @@ class Gateway(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(size))
             if not isinstance(payload, dict) or type(payload.get('stream', False)) is not bool:
                 raise ValueError
-            limit = payload.setdefault('max_tokens', MAX_TOKENS)
+            limit = payload.setdefault('max_tokens', DEFAULT_MAX_TOKENS)
             if type(limit) is not int or not 1 <= limit <= MAX_TOKENS:
                 raise ValueError
         except (ValueError, UnicodeError):
-            self.respond(400, b'{"error":"Use a JSON object, boolean stream and max_tokens from 1 to 2048"}')
+            self.respond(400, b'{"error":"Use a JSON object, boolean stream and max_tokens from 1 to 8192"}')
             return
         if not self.server.slot.acquire(blocking=False):
             self.respond(429, b'{"error":"Inference slot is busy. Try again shortly."}')
@@ -297,8 +300,8 @@ def main():
         with backend_log.open('w') as log:
             llama = subprocess.Popen([str(binary), '--host', '127.0.0.1', '--port', '8080',
                                       '--model', str(weights), '--alias', MODEL, '--n-gpu-layers', '999',
-                                      '--split-mode', 'layer', '--tensor-split', '1,3', '--ctx-size', '4096',
-                                      '--parallel', '1', '--batch-size', '256', '--ubatch-size', '128', '--jinja'],
+                                      '--split-mode', 'layer', '--tensor-split', '1,3', '--ctx-size', str(CONTEXT_SIZE),
+                                      '--parallel', '1', '--batch-size', '256', '--ubatch-size', '128', '--timeout', str(UPSTREAM_TIMEOUT), '--jinja'],
                                      stdout=log, stderr=subprocess.STDOUT, env=env)
         children.append(llama)
         wait_for(lambda: check_status(BACKEND), llama, backend_log, 600)
