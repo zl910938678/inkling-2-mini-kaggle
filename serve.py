@@ -75,45 +75,100 @@ def smoke(url, key=None):
         raise RuntimeError('Inference returned no text')
 
 
-UI = b'''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+def stream_smoke(url, key=None):
+    payload = {'model': MODEL, 'messages': [{'role': 'user', 'content': 'Name one color in English.'}],
+               'stream': True, 'max_tokens': 64}
+    chunks = []
+    with request(url + '/v1/chat/completions', payload, key, timeout=95) as response:
+        if response.headers.get_content_type() != 'text/event-stream':
+            raise RuntimeError('Streaming response did not use text/event-stream')
+        for line in response:
+            if line.startswith(b'data: ') and line.strip() != b'data: [DONE]':
+                chunks.append(line)
+    if not chunks:
+        raise RuntimeError('Streaming inference returned no chunks')
+
+
+UI = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Inkling 2 Mini</title><style>
 *{box-sizing:border-box}body{margin:0;background:#f7f8fa;color:#172a26;font:16px system-ui}
 main{width:min(100% - 32px,700px);margin:5vh auto}h1{font-size:1.8rem}label{display:block;font-weight:600;margin:1rem 0 .4rem}
 input,textarea{width:100%;font:inherit;padding:.65rem;border:1px solid #819790;border-radius:6px}textarea{resize:vertical}
 button{margin:.65rem .35rem 0 0;padding:.5rem .8rem;border-radius:6px;border:1px solid #206044;background:#206044;color:white;font:inherit}button+button{background:white;color:#206044}button:disabled{opacity:.65}
-article{border-top:1px solid #c6d1cd;margin-top:1rem;padding-top:.7rem}p{white-space:pre-wrap;overflow-wrap:anywhere}
-</style><main><h1>Inkling 2 Mini</h1><form id="chat"><label for="key">Session key</label>
+article{border-top:1px solid #c6d1cd;margin-top:1rem;padding-top:.7rem}p{white-space:pre-wrap;overflow-wrap:anywhere}details{color:#53655e;font-size:.9rem}summary{cursor:pointer}
+</style><main><h1>Inkling 2 Mini</h1><p>双 T4 · 实时流式对话</p><form id="chat"><label for="key">会话密钥</label>
 <input type="password" id="key" autocomplete="off" required><div id="history" aria-live="polite"></div>
-<label for="message">Message</label><textarea id="message" rows="4" required maxlength="8000"></textarea>
-<button id="send">Send</button><button type="button" id="clear">Clear chat</button><p id="status" role="status"></p></form></main>
+<label for="message">消息</label><textarea id="message" rows="4" required maxlength="8000"></textarea>
+<button id="send">发送</button><button type="button" id="stop" disabled>停止生成</button><button type="button" id="clear">清空对话</button><p id="status" role="status"></p></form></main>
 <script>
 const get = (id) => document.getElementById(id);
 const key = get('key'), message = get('message'), list = get('history'),
-send = get('send'), clear = get('clear'), statusLine = get('status'), messages = [];
+send = get('send'), clear = get('clear'), stop = get('stop'), statusLine = get('status'), messages = [];
+let controller;
 function append(label, text) {
  const row = document.createElement('article'), title = document.createElement('strong'), body = document.createElement('p');
  title.textContent = label; body.textContent = text; row.append(title, body); list.append(row);
+ return {row, body};
 }
 clear.onclick = () => { messages.length = 0; list.replaceChildren(); statusLine.textContent = ''; };
+stop.onclick = () => controller?.abort();
+async function readEvents(response, onEvent) {
+ const reader = response.body.getReader(), decoder = new TextDecoder();
+ let buffer = '';
+ try {
+  while (true) {
+   const {value, done} = await reader.read();
+   buffer += decoder.decode(value, {stream: !done});
+   const frames = buffer.split(/\r?\n\r?\n/); buffer = frames.pop();
+   for (const frame of frames) {
+    const data = frame.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
+    if (!data) continue;
+    if (data === '[DONE]') { await reader.cancel(); return; }
+    const event = JSON.parse(data);
+    if (event.error) throw new Error(event.error.message || String(event.error));
+    onEvent(event);
+   }
+   if (done) throw new Error('连接提前结束，请重试。');
+  }
+ } finally { reader.releaseLock(); }
+}
 get('chat').onsubmit = async (ev) => {
  ev.preventDefault(); const content = message.value.trim(); if (!content) return;
- send.disabled = clear.disabled = true; statusLine.textContent = 'Generating...';
+ if (controller) return;
+ controller = new AbortController();
+ send.disabled = clear.disabled = key.disabled = true; stop.disabled = false; statusLine.textContent = '正在连接…';
+ append('你', content);
+ const answer = append('Inkling', ''), details = document.createElement('details'), summary = document.createElement('summary'), reasoningBody = document.createElement('p');
+ summary.textContent = '思考过程'; details.append(summary, reasoningBody); details.hidden = true; details.open = true; answer.row.insertBefore(details, answer.body);
+ const user = {role:'user',content}; let output = '', reasoning = '', finishReason = '', complete = false;
  try {
-  const user = {role:'user',content};
   const response = await fetch('/v1/chat/completions', {method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+key.value.trim()},
-   body:JSON.stringify({model:'Inkling-2-Mini',messages:[...messages,user],stream:false,max_tokens:512})});
-  if (!response.ok) throw new Error(response.status === 401 ? 'Check your session key.' : 'Request failed (HTTP '+response.status+').');
-  const reply = (await response.json()).choices[0].message, output = reply.content || reply.reasoning_content;
-  if (!output) throw new Error('The model returned no text.');
-  messages.push(user,{role:'assistant',content:output}); append('You',content); append('Inkling',output);
-  message.value = statusLine.textContent = '';
- } catch (err) { statusLine.textContent = err.message; }
- finally { send.disabled = clear.disabled = false; message.focus(); }
+   body:JSON.stringify({model:'Inkling-2-Mini',messages:[...messages,user],stream:true,max_tokens:512}), signal:controller.signal});
+  if (!response.ok) throw new Error(response.status === 401 ? '会话密钥不正确。' : response.status === 429 ? '模型正在处理其他请求，请稍后重试。' : '请求失败（HTTP '+response.status+'）。');
+  if (!response.headers.get('Content-Type')?.includes('text/event-stream')) throw new Error('服务未返回流式响应。');
+  await readEvents(response, event => {
+   const choice = event.choices?.[0]; if (!choice) return;
+   const delta = choice.delta || {};
+   if (delta.reasoning_content) { reasoning += delta.reasoning_content; reasoningBody.textContent = reasoning; details.hidden = false; statusLine.textContent = '正在思考…'; }
+   if (delta.content) { output += delta.content; answer.body.textContent = output; details.open = false; statusLine.textContent = '正在生成…'; }
+   if (choice.finish_reason) finishReason = choice.finish_reason;
+  });
+  if (!output && !reasoning) throw new Error('模型没有返回文本。');
+  complete = true;
+  statusLine.textContent = finishReason === 'length' ? '已达到本次输出上限。' : '生成完成';
+ } catch (err) { statusLine.textContent = err.name === 'AbortError' ? '已停止生成。' : err.message; }
+ finally {
+  if (output) { messages.push(user,{role:'assistant',content:output}); message.value = ''; }
+  else if (complete && reasoning) statusLine.textContent += ' 当前仅返回了思考过程，可重试或简化问题。';
+  controller = null; send.disabled = clear.disabled = key.disabled = false; stop.disabled = true; message.focus();
+ }
 };
-</script></html>'''
+</script></html>'''.encode('utf-8')
 
 
 class Gateway(BaseHTTPRequestHandler):
+    protocol_version = 'HTTP/1.1'
+
     def log_message(self, *_):
         pass
 
@@ -141,6 +196,34 @@ class Gateway(BaseHTTPRequestHandler):
         except (URLError, TimeoutError):
             self.respond(504, b'{"error":"Model unavailable or timed out"}')
 
+    def proxy_stream(self, payload):
+        started = False
+        try:
+            with request(BACKEND + self.path, payload, timeout=100) as reply:
+                self.send_response(reply.status)
+                self.send_header('Content-Type', 'text/event-stream')
+                self.send_header('Cache-Control', 'no-cache, no-transform')
+                self.send_header('X-Accel-Buffering', 'no')
+                self.send_header('Connection', 'close')
+                self.end_headers()
+                started = True
+                for line in reply:
+                    self.wfile.write(line)
+                    self.wfile.flush()
+        except HTTPError as err:
+            self.respond(err.code, err.read())
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except (URLError, TimeoutError):
+            if not started:
+                self.respond(504, b'{"error":"Model unavailable or timed out"}')
+            else:
+                try:
+                    self.wfile.write(b'data: {"error":{"message":"Model stream timed out"}}\n\n')
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
     def do_GET(self):
         if self.path == '/':
             self.respond(200, UI, 'text/html; charset=utf-8')
@@ -160,19 +243,22 @@ class Gateway(BaseHTTPRequestHandler):
             if not 0 < size <= 8 * 1024**2:
                 raise ValueError
             payload = json.loads(self.rfile.read(size))
-            if not isinstance(payload, dict) or payload.get('stream', False) is not False:
+            if not isinstance(payload, dict) or type(payload.get('stream', False)) is not bool:
                 raise ValueError
             limit = payload.setdefault('max_tokens', 512)
             if type(limit) is not int or not 1 <= limit <= 1024:
                 raise ValueError
         except (ValueError, UnicodeError):
-            self.respond(400, b'{"error":"Use a JSON object, stream=false and max_tokens from 1 to 1024"}')
+            self.respond(400, b'{"error":"Use a JSON object, boolean stream and max_tokens from 1 to 1024"}')
             return
         if not self.server.slot.acquire(blocking=False):
             self.respond(429, b'{"error":"Inference slot is busy. Try again shortly."}')
             return
         try:
-            self.proxy(payload)
+            if payload.get('stream', False):
+                self.proxy_stream(payload)
+            else:
+                self.proxy(payload)
         finally:
             self.server.slot.release()
 
@@ -201,9 +287,6 @@ def main():
     subprocess.run([str(binary), '--list-devices'], env=env, check=True)
     weights = ROOT / 'Inkling-2-Mini-IQ4_NL.gguf'
     download(f'{HF}/{weights.name}', weights, 'cbdf3fa9dc50a4124977980f37da4f1fa764b0cfe800d275cd43d26ce2a81af4')
-    cloudflared = ROOT / 'cloudflared'
-    download('https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64', cloudflared)
-    cloudflared.chmod(0o700)
     key = secrets.token_urlsafe(24)
     backend_log, tunnel_log = ROOT / 'llama.log', ROOT / 'tunnel.log'
     children = []
@@ -223,26 +306,41 @@ def main():
         print(f'Both T4s loaded: {vram} MiB used', flush=True)
         smoke(BACKEND)
         print('Local inference passed', flush=True)
+        stream_smoke(BACKEND)
+        print('Local streaming inference passed', flush=True)
         gateway = ThreadingHTTPServer(('127.0.0.1', 7860), Gateway)
         gateway.auth = f'Bearer {key}'.encode()
         gateway.slot = threading.Lock()
         threading.Thread(target=gateway.serve_forever, daemon=True).start()
         with tunnel_log.open('w') as log:
-            tunnel = subprocess.Popen([str(cloudflared), 'tunnel', '--no-autoupdate', '--protocol', 'http2',
-                                       '--url', 'http://127.0.0.1:7860'], stdout=log, stderr=subprocess.STDOUT)
+            tunnel = subprocess.Popen([
+                'ssh', '-T', '-p', '443',
+                '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'IdentityFile=none',
+                '-o', 'ConnectTimeout=20',
+                '-o', 'StrictHostKeyChecking=accept-new',
+                '-o', f'UserKnownHostsFile={ROOT / "known_hosts"}',
+                '-o', 'ServerAliveInterval=30',
+                '-o', 'ServerAliveCountMax=3',
+                '-o', 'ExitOnForwardFailure=yes',
+                '-R', '80:127.0.0.1:7860',
+                'nokey@localhost.run',
+            ], stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         children.append(tunnel)
 
         def public_ready():
-            match = re.search(r'https://[a-z0-9-]+\.trycloudflare\.com', tunnel_log.read_text(errors='replace'))
+            match = re.search(r'https://[a-z0-9-]+(?:\.app)?\.lhr\.life', tunnel_log.read_text(errors='replace'))
+            if not match:
+                match = re.search(r'https://[a-z0-9-]+\.localhost\.run', tunnel_log.read_text(errors='replace'))
             if match and check_status(match[0]):
                 return match[0]
 
         url = wait_for(public_ready, tunnel, tunnel_log, 180)
         smoke(url, key)
+        stream_smoke(url, key)
         print(f'PUBLIC_URL={url}\nOPENAI_BASE_URL={url}/v1\nSESSION_KEY={key}', flush=True)
         while all(proc.poll() is None for proc in children):
             time.sleep(5)
-        raise RuntimeError('llama-server or cloudflared stopped unexpectedly')
+        raise RuntimeError('llama-server or SSH tunnel stopped unexpectedly')
     finally:
         for proc in reversed(children):
             if proc.poll() is None:
