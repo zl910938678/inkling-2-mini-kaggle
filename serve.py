@@ -314,7 +314,7 @@ def main():
         threading.Thread(target=gateway.serve_forever, daemon=True).start()
         with tunnel_log.open('w') as log:
             tunnel = subprocess.Popen([
-                'ssh', '-T', '-p', '443',
+                'ssh', '-T', '-p', '22',
                 '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'IdentityFile=none',
                 '-o', 'ConnectTimeout=20',
                 '-o', 'StrictHostKeyChecking=accept-new',
