@@ -1,18 +1,24 @@
 # Inkling 2 Mini on Kaggle T4 x2
 
-用 Kaggle 双 T4 运行 Inkling 2 Mini，并通过 Cloudflare Quick Tunnel 提供临时网页和 OpenAI 兼容 API。
+Run Inkling 2 Mini on two Kaggle T4 GPUs and expose a temporary web page and OpenAI-compatible API through a Cloudflare Quick Tunnel.
 
-## 首次配置
+## One-click run
 
-1. 在 Kaggle 创建或打开一个私有 Notebook，导入本仓库的 `kaggle.ipynb`。启动入口已配置为 `zl910938678/inkling-2-mini-kaggle`。
-2. 启用 Internet，加速器选择 GPU T4 x2。
-3. 私有仓库需要在 GitHub 创建仅限本仓库、Contents: Read-only 的 fine-grained token，并在 Kaggle Secrets 保存为 `GITHUB_READ_TOKEN`，然后授权给 Notebook。公开仓库可将 `PRIVATE_REPO` 改为 `False`。
-4. 以后打开 Notebook，点击 Run All，即可拉取 `main` 分支并启动。
+1. Open the private [Kaggle Notebook](https://www.kaggle.com/code/earthtop/inkling-2-mini-dual-t4/edit) and click **Run All**. Its launch cell anonymously clones the latest `main` branch from this public repository. No GitHub login, token, or Kaggle Secret is needed.
+2. To create another notebook, import [`kaggle.ipynb`](kaggle.ipynb), enable Internet, select **GPU T4 x2**, and click **Run All**.
+3. The first run downloads about 18 GB of model weights. Wait for the log lines `PUBLIC_URL`, `OPENAI_BASE_URL`, and `SESSION_KEY`.
 
-## 访问
+## Access
 
-启动器会验证双卡显存、执行本地推理和公网推理，然后输出 `PUBLIC_URL`、`OPENAI_BASE_URL` 和 `SESSION_KEY`。浏览器打开 `PUBLIC_URL`，输入当前会话密钥即可聊天。
+Open `PUBLIC_URL` in a browser and enter the `SESSION_KEY` from the current run. The launcher checks both T4 GPUs and performs local and public inference smoke tests before printing the access values.
 
-API 使用 `OPENAI_BASE_URL`、模型名 `Inkling-2-Mini` 和 `SESSION_KEY`。请求使用 `stream: false`；Quick Tunnel 不支持 SSE。停止 Kaggle 会话会关闭服务，每次重启会生成新的地址和密钥。
+API client settings:
 
-首次运行需要下载约 18 GB 权重。只在私有 Notebook 中运行，不要公开包含 `SESSION_KEY` 的输出。
+- Base URL: the logged `OPENAI_BASE_URL`, ending in `/v1`.
+- API key: the current run's `SESSION_KEY`.
+- Model: `Inkling-2-Mini`.
+- Request settings: `stream: false` and `max_tokens` from 1 to 1024. Quick Tunnels do not support SSE.
+
+Stopping the Kaggle session or reaching its runtime limit closes the service and invalidates the temporary address. Run the notebook again to create a new address and session key.
+
+The repository is public only so Kaggle can fetch source anonymously. Keep the deployment notebook private and do not publish logs containing `SESSION_KEY`. No credentials belong in this repository.
